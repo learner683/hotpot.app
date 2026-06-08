@@ -1,0 +1,289 @@
+import requests
+import json
+import re
+from datetime import datetime
+import jieba
+from itertools import combinations
+from openai import OpenAI
+
+# ==================== 配置区 ====================
+DEEPSEEK_API_KEY = "你的DeepSeek_API_Key"          # 必填
+DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+DEEPSEEK_MODEL = "deepseek-chat"
+
+# 知乎 Cookie 配置（必须替换为你自己的 z_c0 值，否则知乎抓取会失败）
+ZHIHU_COOKIE = "z_c0=你的z_c0值"
+
+# ==================== 模块一：多源采集 ====================
+def get_weibo_hotsearch():
+    url = "https://weibo.com/ajax/side/hotSearch"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://weibo.com/",
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        hot_list = data.get("data", {}).get("realtime", [])
+        if not hot_list:
+            print("⚠️ 微博无数据")
+            return []
+        print(f"✅ 微博: {len(hot_list)} 条")
+        cleaned = []
+        for item in hot_list:
+            raw = item.get("word", "")
+            clean = raw.replace("热","").replace("沸","").replace("爆","").replace("新","").strip()
+            cleaned.append({
+                "source": "weibo",
+                "title": clean,
+                "url": f"https://s.weibo.com/weibo?q={raw}",
+                "raw_rank": item.get("rank", 0),
+                "raw_hot": item.get("num", 0),
+                "fetch_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            })
+        return cleaned
+    except Exception as e:
+        print(f"❌ 微博失败: {e}")
+        return []
+
+def get_baidu_hotsearch():
+    """百度实时热搜 — 官方 JSON 接口"""
+    url = "https://top.baidu.com/api/board?tab=realtime&platform=wise"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://top.baidu.com/",
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        cards = data.get("data", {}).get("cards", [])
+        hot_list = []
+        for card in cards:
+            if card.get("card_type") == "realtime":
+                hot_list = card.get("content", [])
+                break
+        if not hot_list:
+            print("⚠️ 百度无数据")
+            return []
+        print(f"✅ 百度: {len(hot_list)} 条")
+        cleaned = []
+        for idx, item in enumerate(hot_list, 1):
+            title = item.get("word", "").strip()
+            cleaned.append({
+                "source": "baidu",
+                "title": title,
+                "url": item.get("url", ""),
+                "raw_rank": idx,
+                "raw_hot": item.get("hotScore", 0),
+                "fetch_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            })
+        return cleaned
+    except Exception as e:
+        print(f"❌ 百度失败: {e}")
+        return []
+
+def get_bilibili_hotlist():
+    """B站热搜词 — 官方搜索广场接口"""
+    url = "https://api.bilibili.com/x/web-interface/search/square?limit=50"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://www.bilibili.com/",
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        hot_list = data.get("data", {}).get("trending", {}).get("list", [])
+        if not hot_list:
+            print("⚠️ B站无数据")
+            return []
+        print(f"✅ B站: {len(hot_list)} 条")
+        cleaned = []
+        for idx, item in enumerate(hot_list, 1):
+            title = item.get("keyword", "").strip()
+            cleaned.append({
+                "source": "bilibili",
+                "title": title,
+                "url": f"https://search.bilibili.com/all?keyword={title}",
+                "raw_rank": idx,
+                "raw_hot": item.get("heat", 0),
+                "fetch_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            })
+        return cleaned
+    except Exception as e:
+        print(f"❌ B站失败: {e}")
+        return []
+
+def get_zhihu_hotlist():
+    """知乎热榜 — 需要有效的 z_c0 Cookie，请替换代码开头的 ZHIHU_COOKIE"""
+    url = "https://www.zhihu.com/api/v3/feed/topstory/hot-lists/total?limit=50"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Cookie": ZHIHU_COOKIE,
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        hot_list = data.get("data", [])
+        if not hot_list:
+            print("⚠️ 知乎无数据（可能是 Cookie 失效，请更新）")
+            return []
+        print(f"✅ 知乎: {len(hot_list)} 条")
+        cleaned = []
+        for idx, item in enumerate(hot_list, 1):
+            target = item.get("target", {})
+            title = target.get("title", "").strip()
+            url = target.get("url", "")
+            cleaned.append({
+                "source": "zhihu",
+                "title": title,
+                "url": url,
+                "raw_rank": idx,
+                "raw_hot": item.get("heat", 0),
+                "fetch_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            })
+        return cleaned
+    except Exception as e:
+        print(f"❌ 知乎失败: {e}")
+        return []
+
+# ==================== 模块二：聚合去重 ====================
+def tokenize(title):
+    title = re.sub(r'[^\w]', '', title)
+    words = jieba.lcut(title)
+    return set(w.lower() for w in words if len(w) > 1)
+
+def jaccard(set1, set2):
+    if not set1 or not set2:
+        return 0.0
+    return len(set1 & set2) / len(set1 | set2)
+
+def cluster_items(items, threshold=0.3):
+    token_list = [(item, tokenize(item['title'])) for item in items]
+    parent = {id(it): id(it) for it, _ in token_list}
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    def union(x, y):
+        rx, ry = find(x), find(y)
+        if rx != ry:
+            parent[rx] = ry
+
+    for (it1, tok1), (it2, tok2) in combinations(token_list, 2):
+        if jaccard(tok1, tok2) >= threshold:
+            union(id(it1), id(it2))
+
+    groups = {}
+    for it, _ in token_list:
+        root = find(id(it))
+        groups.setdefault(root, []).append(it)
+
+    events = []
+    for idx, group in enumerate(groups.values(), start=1):
+        titles = [g['title'] for g in group]
+        sources = list({g['source'] for g in group})
+        total_hot = sum(g['raw_hot'] for g in group)
+        events.append({
+            "event_id": idx,
+            "summary": titles[0],
+            "titles": titles,
+            "sources": sources,
+            "item_count": len(group),
+            "total_hot": total_hot,
+            "items": group
+        })
+    events.sort(key=lambda x: x['total_hot'], reverse=True)
+    return events
+
+# ==================== 模块三：DeepSeek 深度搜索 ====================
+def deep_search_single_event(event, client):
+    summary = event["summary"]
+    titles = "；".join(event["titles"])
+    messages = [
+        {"role": "system", "content": "你是一位资深媒体分析师。使用联网搜索获取最新信息，并从事实、观点、影响三个维度输出结构化分析。"},
+        {"role": "user", "content": (
+            f"事件摘要：{summary}\n关联标题：{titles}\n\n"
+            "请按以下 JSON 格式返回（只返回 JSON，不要其他内容）：\n"
+            '{\n'
+            '  "background": "事件简要背景",\n'
+            '  "key_points": ["要点1", "要点2"],\n'
+            '  "opinions": {"支持": ["观点"], "反对": ["观点"], "中立": ["观点"]},\n'
+            '  "official_response": "官方回应（无则填\'无\'）",\n'
+            '  "impact": "潜在影响",\n'
+            '  "references": ["链接"]\n'
+            '}'
+        )}
+    ]
+    response = client.chat.completions.create(
+        model=DEEPSEEK_MODEL,
+        messages=messages,
+        extra_body={"enable_search": True},
+        temperature=0.3,
+    )
+    raw = response.choices[0].message.content
+    try:
+        json_start = raw.find("{")
+        return json.loads(raw[json_start:])
+    except:
+        return {"raw_text": raw}
+
+def run_deep_search(events_file="events.json", output_file="deep_search_results.json"):
+    if DEEPSEEK_API_KEY == "你的DeepSeek_API_Key":
+        print("❌ 请先填写 DeepSeek API Key")
+        return
+    client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+    with open(events_file, "r", encoding="utf-8") as f:
+        events = json.load(f)
+    print(f"🔍 开始对 {len(events)} 个事件进行深度搜索...")
+    results = []
+    for i, ev in enumerate(events, 1):
+        print(f"  [{i}/{len(events)}] {ev['summary'][:30]}...", end=" ")
+        try:
+            ev["search_material"] = deep_search_single_event(ev, client)
+            results.append(ev)
+            print("✓")
+        except Exception as e:
+            print(f"✗ ({e})")
+            ev["search_material"] = {"error": str(e)}
+            results.append(ev)
+    with open(output_file, "w", encoding="utf-8") as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
+    print(f"📁 搜索结果已保存至 {output_file}")
+
+# ==================== 模块四：报告生成 ====================
+def generate_single_report(event, client):
+    summary = event["summary"]
+    material = json.dumps(event.get("search_material", {}), ensure_ascii=False)
+    prompt = f"""你是一位资深商业与舆情分析师。基于以下事件和素材，撰写专业的热点分析报告。
+
+事件：{summary}
+素材：{material}
+
+请严格按以下 Markdown 结构输出：
+## 1. 事件概述（5W1H，100字）
+## 2. 传播趋势
+## 3. 舆论阵营分析
+## 4. 深层影响（行业/社会/政策）
+## 5. 未来走向预判（3种方向，最可能的那种）
+"""
+    response = client.chat.completions.create(
+        model=DEEPSEEK_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.5,
+        max_tokens=2000
+    )
+    return response.choices[0].message.content
+
+def run_report_generation(input_file="deep_search_results.json", output_file="final_reports.json"):
+    if DEEPSEEK_API_KEY == "你的DeepSeek_API_Key":
+        print("❌ 请先填写 DeepSeek API Key")
+        return
+    client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+    with open(input_file, "r", encoding="utf-8") as f:
+        events = json.load(f)
+    print(f"📝 开始生成 {len(events)} 份报告...
